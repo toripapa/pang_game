@@ -220,7 +220,7 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   // 💡 [테스트 설정] 배포 시 false로 바꾸면 테스트 버튼이 사라집니다.
-  final bool isTestMode = true;
+  final bool isTestMode = false;
 
   // 💡 [속도 조절 마스터 변수] 1.0이 기본 속도, 0.5면 50% 느려짐, 2.0이면 2배 빨라짐
   final double globalBallSpeed = 0.6;
@@ -434,9 +434,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         bool canShootMissile = false;
         if (ball.sizeLevel >= 4) {
           if (ball.isBoss) {
-            if (currentRound == 9 || currentRound == 10) canShootMissile = true;
-          } else {
-            canShootMissile = true;
+            if (currentRound == 9 || currentRound == 10) { canShootMissile = true; }
           }
         }
         if (canShootMissile && random.nextDouble() < 0.015) {
