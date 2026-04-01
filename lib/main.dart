@@ -3,9 +3,28 @@ import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:audioplayers/audioplayers.dart'; // 💡 사운드 패키지 추가
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    await Firebase.initializeApp(
+      options: const FirebaseOptions(
+        apiKey: "AIzaSyBqdPjDzJJcSZYsem9sbZZY_Gf9TMAXm0o",
+        appId: "1:749732944978:android:4d1f1f81da6621b19c138b",
+        messagingSenderId: "749732944978",
+        projectId: "somindoyoonapp",
+        storageBucket: "somindoyoonapp.firebasestorage.app",
+      ),
+    );
+    debugPrint("🔥 Firebase 연결 성공!");
+  } catch (e) {
+    debugPrint("Firebase 초기화 에러: $e");
+  }
+
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -13,7 +32,6 @@ void main() {
   runApp(const RealPangGameApp());
 }
 
-// 💡 누락되었던 메인 앱 클래스 복구!
 class RealPangGameApp extends StatelessWidget {
   const RealPangGameApp({super.key});
 
@@ -94,13 +112,13 @@ class _GameLoaderState extends State<GameLoader> {
         backgroundColor: Color(0xFF1A1A2E),
         body: Center(
             child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircularProgressIndicator(color: Colors.orange),
-            SizedBox(height: 20),
-            Text("리소스를 불러오는 중...", style: TextStyle(color: Colors.white)),
-          ],
-        )),
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(color: Colors.orange),
+                SizedBox(height: 20),
+                Text("리소스를 불러오는 중...", style: TextStyle(color: Colors.white)),
+              ],
+            )),
       );
     }
     return const GameScreen();
@@ -108,7 +126,6 @@ class _GameLoaderState extends State<GameLoader> {
 }
 
 // --- 게임 모델 클래스 ---
-
 class Ball {
   double x, y;
   double vx, vy;
@@ -210,7 +227,6 @@ class Missile {
 }
 
 // --- 메인 게임 화면 ---
-
 class GameScreen extends StatefulWidget {
   const GameScreen({super.key});
 
@@ -219,11 +235,16 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
-  // 💡 [테스트 설정] 배포 시 false로 바꾸면 테스트 버튼이 사라집니다.
-  final bool isTestMode = false;
+  bool isTestMode = true;
+  bool isUnlocked = false;
+  final TextEditingController _secretCodeController = TextEditingController();
 
-  // 💡 [속도 조절 마스터 변수] 1.0이 기본 속도, 0.5면 50% 느려짐, 2.0이면 2배 빨라짐
   final double globalBallSpeed = 0.6;
+
+  String playerId = "";
+  final TextEditingController _idController = TextEditingController();
+  List<Map<String, dynamic>> topRankings = [];
+  bool isSavingScore = false;
 
   late Size screenSize;
   double playerX = 0;
@@ -277,6 +298,15 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (playerX == 0) playerX = screenSize.width / 2;
   }
 
+  // 💡 사운드 재생 함수 추가
+  void _playSound(String fileName) async {
+    try {
+      await AudioPlayer().play(AssetSource('audio/$fileName'));
+    } catch (e) {
+      debugPrint("사운드 재생 에러: $e");
+    }
+  }
+
   void _onPlayerSelected(ui.Image? image) {
     setState(() { selectedPlayerImage = image; selectionState = 1; });
   }
@@ -288,7 +318,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   void _onModeSelected(int mode) {
     setState(() {
       controlMode = mode;
-      selectionState = 3;
+      selectionState = 4;
       _startFullGame();
     });
   }
@@ -298,16 +328,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       if (clear) {
         score = 0;
         isGameClear = true;
-        selectionState = 3;
+        selectionState = 4;
+        _saveScoreAndFetchRanking();
       } else {
         score = 0;
         currentRound = round;
+
+        // 보스 카운트 맵핑 (20라운드 구조 반영)
         if (round <= 3) bossDefeatCount = 0;
         else if (round <= 6) bossDefeatCount = 1;
         else if (round <= 9) bossDefeatCount = 2;
-        else bossDefeatCount = 3;
+        else if (round <= 10) bossDefeatCount = 3;
+        else if (round <= 13) bossDefeatCount = 4;
+        else if (round <= 16) bossDefeatCount = 5;
+        else if (round <= 19) bossDefeatCount = 6;
+        else bossDefeatCount = 7;
 
-        selectionState = 3;
+        selectionState = 4;
         _startRound();
       }
     });
@@ -319,6 +356,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     bossDefeatCount = 0;
     isGameOver = false;
     isGameClear = false;
+    isSavingScore = false;
+    topRankings.clear();
     playerSpeedLevel = 0;
     maxActiveArrows = 1;
     multiShotLevel = 0;
@@ -344,20 +383,30 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     isRightPressed = false;
     _focusNode.requestFocus();
 
-    double bounceMult = 1.0 + (bossDefeatCount * 0.05);
+    // 11~20라운드가 1~10라운드의 패턴을 따르도록 매핑
+    int mappedRound = ((currentRound - 1) % 10) + 1;
+    bool isBossRound = (mappedRound == 3 || mappedRound == 6 || mappedRound == 9 || mappedRound == 10);
 
-    // 💡 [개수 증가 규칙 수정] 보스를 깰 때마다(bossDefeatCount) 일반 공 1개씩 추가됨
-    int ballCount = 1 + bossDefeatCount;
+    // 라운드 구간별 스피드 배율 적용
+    double roundSpeedMult = 1.0;
+    if (currentRound >= 17) roundSpeedMult = 1.3;
+    else if (currentRound >= 14) roundSpeedMult = 1.2;
+    else if (currentRound >= 11) roundSpeedMult = 1.1;
+
+    // 최종 바운스/속도 멀티플라이어 (보스처치 증가율 + 라운드 증가율 모두 반영)
+    double bounceMult = (1.0 + (bossDefeatCount * 0.05)) * roundSpeedMult;
+
+    // 11~20 라운드는 기본 공 2개 추가
+    int baseBallCount = 1 + bossDefeatCount;
+    int ballCount = baseBallCount + (currentRound >= 11 ? 2 : 0);
 
     balls = [];
 
-    bool isBossRound = (currentRound == 3 || currentRound == 6 || currentRound == 9 || currentRound == 10);
-
     if (isBossRound) {
       int bossHp = 15;
-      if (currentRound == 6) bossHp = 25;
-      else if (currentRound == 9) bossHp = 35;
-      else if (currentRound == 10) bossHp = 50;
+      if (mappedRound == 6) bossHp = 25;
+      else if (mappedRound == 9) bossHp = 35;
+      else if (mappedRound == 10) bossHp = 50;
 
       var boss = Ball(x: screenSize.width / 2, y: 150, vx: 2.0 * bounceMult, vy: 0, sizeLevel: 5, hp: bossHp, bounceSpeedMult: bounceMult);
       boss.isBoss = true;
@@ -379,11 +428,43 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     setState(() {});
   }
 
+  Future<void> _saveScoreAndFetchRanking() async {
+    if (isSavingScore) return;
+    setState(() { isSavingScore = true; });
+
+    try {
+      await FirebaseFirestore.instance.collection('high_scores').add({
+        'playerId': playerId.isEmpty ? "무명용사" : playerId,
+        'score': score,
+        'round': currentRound,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      var snapshot = await FirebaseFirestore.instance
+          .collection('high_scores')
+          .orderBy('score', descending: true)
+          .limit(5)
+          .get();
+
+      if (mounted) {
+        setState(() {
+          topRankings = snapshot.docs.map((doc) => doc.data()).toList();
+          isSavingScore = false;
+        });
+      }
+    } catch (e) {
+      debugPrint("DB 저장 및 불러오기 에러: $e");
+      if (mounted) setState(() { isSavingScore = false; });
+    }
+  }
+
   void _gameLoop(Timer timer) {
     if (!isPlaying || isGameOver || isGameClear || isRoundTransition) return;
 
     setState(() {
       double groundY = screenSize.height - 60;
+      int mappedRound = ((currentRound - 1) % 10) + 1;
+
       if (fireCooldown > 0) fireCooldown--;
       if (_flashTimer > 0) _flashTimer--;
 
@@ -394,8 +475,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
 
       List<Ball> newClones = [];
-
-      // 💡 [추가 1] 반복문을 돌기 전에 현재 살아있는 분신의 개수를 셉니다!
       int currentCloneCount = balls.where((b) => b.isClone).length;
 
       for (var ball in balls) {
@@ -405,20 +484,17 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             ball.bounceSpeedMult *= 1.01;
             ball.vx *= 1.01;
           }
-          // 1. [순간이동] 약 3초(187프레임)마다 실행ㅎ
           if (ball.frameCount % 187 == 0) {
-            if (currentRound == 3 || currentRound == 10) {
+            if (mappedRound == 3 || mappedRound == 10) {
               ball.x = 50 + random.nextDouble() * (screenSize.width - 100);
               ball.y = 50 + random.nextDouble() * 100;
             }
-            if (currentRound == 10) {
+            if (mappedRound == 10) {
               _flashTimer = 15;
             }
           }
-
-          // 2. [복제] 약 10초(625프레임)마다 실행 👈 이 부분을 새로 만듭니다!
           if (ball.frameCount % 625 == 0) {
-            if ((currentRound == 6 || currentRound == 10) && !ball.isClone) {
+            if ((mappedRound == 6 || mappedRound == 10) && !ball.isClone) {
               if (currentCloneCount + newClones.length < 5) {
                 var clone = Ball(x: ball.x, y: ball.y, vx: -ball.vx, vy: ball.vy,
                     sizeLevel: ball.sizeLevel, hp: max(1, ball.hp ~/ 2),
@@ -432,11 +508,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         }
 
         bool canShootMissile = false;
-        if (ball.sizeLevel >= 4) {
-          if (ball.isBoss) {
-            if (currentRound == 9 || currentRound == 10) { canShootMissile = true; }
-          }
+        if (ball.isBoss) {
+          if (mappedRound == 9 || mappedRound == 10) { canShootMissile = true; }
         }
+
         if (canShootMissile && random.nextDouble() < 0.015) {
           missiles.add(Missile(x: ball.x, y: ball.y + ball.radius));
         }
@@ -453,6 +528,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         Rect missileRect = Rect.fromLTWH(missiles[i].x - 4, missiles[i].y - 10, 6, 18);
         if (playerRect.overlaps(missileRect)) {
           isGameOver = true; isPlaying = false; gameTimer?.cancel();
+          _saveScoreAndFetchRanking();
         } else if (!missiles[i].active) {
           missiles.removeAt(i);
         }
@@ -469,6 +545,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           Offset ballCenter = Offset(ball.x, ball.y);
           for (int p = 0; p < points.length - 1; p++) {
             if (_lineCircleIntersect(points[p], points[p+1], ballCenter, ball.radius)) {
+              // 💡 화살이 공을 명중했을 때 사운드 재생!
+              _playSound('pang_hit.wav');
+
               ball.hp--;
               ball.hitTimer = 5;
               if (ball.hp <= 0) _splitBall(i);
@@ -495,26 +574,27 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
       }
 
       for (int i = 0; i < balls.length; i++) {
-        // 💡 [수정 1] 볼의 update를 호출할 때 글로벌 스피드를 넘겨줌
         balls[i].update(screenSize.width, screenSize.height, gravity, globalBallSpeed);
 
         Offset ballCenter = Offset(balls[i].x, balls[i].y);
         if (_checkIntersect(playerRect, ballCenter, balls[i].radius * 0.75)) {
           isGameOver = true; isPlaying = false; gameTimer?.cancel();
+          _saveScoreAndFetchRanking();
         }
       }
 
       if (balls.isEmpty) {
         isPlaying = false; gameTimer?.cancel(); isRoundTransition = true;
         isLeftPressed = false; isRightPressed = false;
-        if (currentRound == 3 || currentRound == 6 || currentRound == 9 || currentRound == 10) {
+        if (mappedRound == 3 || mappedRound == 6 || mappedRound == 9 || mappedRound == 10) {
           showDefeatedBoss = true;
           bossDefeatCount++;
         }
         Future.delayed(const Duration(seconds: 2), () {
           if (!isGameOver && mounted) {
-            if (currentRound >= 10) {
+            if (currentRound >= 20) { // 총 20라운드 달성 시 게임 클리어
               setState(() { isGameClear = true; });
+              _saveScoreAndFetchRanking();
             } else {
               currentRound++;
               _startRound();
@@ -556,7 +636,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (hitBall.sizeLevel > 1) {
       int nextLevel = hitBall.sizeLevel - 1;
 
-      // 💡 스플릿 될 때 속도 역시 globalBallSpeed의 영향을 받게 보정
+      // bounceSpeedMult에 라운드 증가 속도 배수가 포함되어 있어 분열 공도 속도 증가가 동일하게 적용됨
       double splitVy = (-5.0 - (hitBall.sizeLevel * 0.4)) * hitBall.bounceSpeedMult;
       double baseSplitVx = 1.0 + (5 - hitBall.sizeLevel) * 0.2;
       double splitVx = (baseSplitVx * max(1.0, globalBallSpeed * 1.5)) * hitBall.bounceSpeedMult;
@@ -602,15 +682,22 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   void dispose() {
     gameTimer?.cancel();
     _focusNode.dispose();
+    _idController.dispose();
+    _secretCodeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     screenSize = MediaQuery.of(context).size;
-    bool isBossRound = (currentRound == 3 || currentRound == 6 || currentRound == 9 || currentRound == 10);
-    int bgRoundIndex = currentRound <= 10 ? currentRound : 10;
-    bool nextIsBoss = (currentRound + 1 == 3 || currentRound + 1 == 6 || currentRound + 1 == 9 || currentRound + 1 == 10);
+
+    // 배경은 1~10 이미지 재활용
+    int mappedRound = ((currentRound - 1) % 10) + 1;
+    bool isBossRound = (mappedRound == 3 || mappedRound == 6 || mappedRound == 9 || mappedRound == 10);
+    int bgRoundIndex = mappedRound;
+
+    int nextMappedRound = ((currentRound + 1 - 1) % 10) + 1;
+    bool nextIsBoss = (nextMappedRound == 3 || nextMappedRound == 6 || nextMappedRound == 9 || nextMappedRound == 10);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -618,7 +705,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         focusNode: _focusNode,
         autofocus: true,
         onKeyEvent: (FocusNode node, KeyEvent event) {
-          if (selectionState != 3 || controlMode != 0) return KeyEventResult.ignored;
+          if (selectionState != 4 || controlMode != 0) return KeyEventResult.ignored;
           if (event is KeyDownEvent) {
             if (event.logicalKey == LogicalKeyboardKey.arrowLeft || event.logicalKey == LogicalKeyboardKey.keyA) isLeftPressed = true;
             else if (event.logicalKey == LogicalKeyboardKey.arrowRight || event.logicalKey == LogicalKeyboardKey.keyD) isRightPressed = true;
@@ -631,7 +718,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         },
         child: GestureDetector(
           onTapDown: (details) {
-            if (selectionState == 3) {
+            if (selectionState == 4) {
               if (controlMode == 1) {
                 setState(() => _movePlayerTo(details.localPosition.dx));
                 _fireArrow();
@@ -643,23 +730,23 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
             }
           },
           onPanUpdate: (details) {
-            if (selectionState == 3 && (controlMode == 1 || controlMode == 2)) {
+            if (selectionState == 4 && (controlMode == 1 || controlMode == 2)) {
               setState(() => _movePlayerTo(details.localPosition.dx));
             }
           },
           onTapUp: (details) {
-            if (selectionState == 3 && controlMode == 2) {
+            if (selectionState == 4 && controlMode == 2) {
               _fireArrow();
             }
           },
           onPanEnd: (details) {
-            if (selectionState == 3 && controlMode == 2) {
+            if (selectionState == 4 && controlMode == 2) {
               _fireArrow();
             }
           },
           child: Stack(
             children: [
-              if (selectionState == 3)
+              if (selectionState == 4)
                 Container(
                   width: double.infinity, height: double.infinity,
                   decoration: BoxDecoration(
@@ -677,13 +764,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                   ),
                 ),
 
-              if (selectionState == 3 && _flashTimer > 0)
+              if (selectionState == 4 && _flashTimer > 0)
                 Container(
                   width: double.infinity, height: double.infinity,
                   color: Colors.red.withOpacity(0.4),
                 ),
 
-              if (selectionState == 3) ...[
+              if (selectionState == 4) ...[
                 Positioned(
                   top: 40, left: 20,
                   child: Column(
@@ -698,7 +785,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(5)),
-                        child: Text("ROUND $currentRound / 10", style: TextStyle(color: isBossRound ? Colors.redAccent : Colors.orangeAccent, fontSize: 24, fontWeight: FontWeight.bold)),
+                        child: Text("ROUND $currentRound / 20", style: TextStyle(color: isBossRound ? Colors.redAccent : Colors.orangeAccent, fontSize: 24, fontWeight: FontWeight.bold)),
                       ),
                       const SizedBox(height: 10),
                       Row(
@@ -749,67 +836,210 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                 Container(
                   color: Colors.black87,
                   child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Text("조작 방식을 선택하세요", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 50),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _buildModeButton(Icons.keyboard, "키보드", "A, D 이동\nSpace 발사", () => _onModeSelected(0)),
-                            _buildModeButton(Icons.touch_app, "스마트폰 1", "화면 터치 시\n즉시 이동/발사", () => _onModeSelected(1)),
-                            _buildModeButton(Icons.swipe, "스마트폰 2", "드래그로 이동\n손 떼면 발사", () => _onModeSelected(2)),
-                          ],
-                        ),
-
-                        if (isTestMode) ...[
-                          const SizedBox(height: 60),
-                          const Text("--- 테스트 바로가기 ---", style: TextStyle(color: Colors.white54, fontSize: 14)),
-                          const SizedBox(height: 15),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              _buildJumpButton("보스1", () => _jumpTo(3)),
-                              _buildJumpButton("보스2", () => _jumpTo(6)),
-                              _buildJumpButton("보스3", () => _jumpTo(9)),
-                              _buildJumpButton("보스4", () => _jumpTo(10)),
-                              _buildJumpButton("완료", () => _jumpTo(0, clear: true), color: Colors.green),
-                            ],
+                    child: Padding(
+                      padding: const EdgeInsets.all(40.0),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text("아이디를 입력하세요", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 30),
+                          TextField(
+                            controller: _idController,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.orange, fontSize: 24, fontWeight: FontWeight.bold),
+                            decoration: InputDecoration(
+                              hintText: "내 닉네임",
+                              hintStyle: const TextStyle(color: Colors.white24),
+                              enabledBorder: OutlineInputBorder(borderSide: const BorderSide(color: Colors.orange, width: 2), borderRadius: BorderRadius.circular(15)),
+                              focusedBorder: OutlineInputBorder(borderSide: const BorderSide(color: Colors.white, width: 2), borderRadius: BorderRadius.circular(15)),
+                            ),
+                          ),
+                          const SizedBox(height: 30),
+                          ElevatedButton(
+                            onPressed: () {
+                              if (_idController.text.trim().isNotEmpty) {
+                                setState(() {
+                                  playerId = _idController.text.trim();
+                                  selectionState = 3;
+                                });
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 15), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
+                            child: const Text("확인", style: TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold)),
                           )
-                        ]
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
 
-              if (selectionState == 3 && (isGameOver || isGameClear))
+              if (selectionState == 3)
                 Container(
-                  color: Colors.black.withAlpha(230),
+                  color: Colors.black87,
+                  child: Center(
+                    child: SingleChildScrollView( // 💡 내용이 길어지면 자동 스크롤 되도록 추가
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text("조작 방식을 선택하세요", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 50),
+
+                          // 💡 조작 방식이 화면을 넘치지 않게 Wrap 적용
+                          Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: 15,
+                            runSpacing: 15,
+                            children: [
+                              _buildModeButton(Icons.keyboard, "키보드", "A, D 이동\nSpace 발사", () => _onModeSelected(0)),
+                              _buildModeButton(Icons.touch_app, "스마트폰 1", "화면 터치 시\n즉시 이동/발사", () => _onModeSelected(1)),
+                              _buildModeButton(Icons.swipe, "스마트폰 2", "드래그로 이동\n손 떼면 발사", () => _onModeSelected(2)),
+                            ],
+                          ),
+
+                          const SizedBox(height: 60),
+
+                          // 💡 진짜 비밀번호처럼 가려지는 입력창 (131012 입력시에만 활성화)
+                          SizedBox(
+                            width: 150,
+                            child: TextField(
+                              controller: _secretCodeController,
+                              obscureText: true, // 입력한 글자를 가림
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white54, fontSize: 16),
+                              decoration: const InputDecoration(
+                                hintText: "Secret Code",
+                                hintStyle: TextStyle(color: Colors.white10),
+                                enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                                focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
+                              ),
+                              onChanged: (value) {
+                                // 테스트 모드가 켜져 있을 때만 비밀번호 검사 작동
+                                if (isTestMode) {
+                                  setState(() { isUnlocked = (value == "131012"); });
+                                }
+                              },
+                            ),
+                          ),
+
+                          // 💡 코드가 맞아야만 아래 버튼 그룹이 나타남
+                          if (isTestMode && isUnlocked ) ...[
+                            const SizedBox(height: 15),
+                            // 💡 점프 버튼들도 화면을 넘치지 않게 Wrap 적용
+                            Wrap(
+                              alignment: WrapAlignment.center,
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                _buildJumpButton("보스1(3)", () => _jumpTo(3)),
+                                _buildJumpButton("보스2(6)", () => _jumpTo(6)),
+                                _buildJumpButton("보스3(9)", () => _jumpTo(9)),
+                                _buildJumpButton("보스4(10)", () => _jumpTo(10)),
+                                _buildJumpButton("보스5(13)", () => _jumpTo(13)),
+                                _buildJumpButton("보스6(16)", () => _jumpTo(16)),
+                                _buildJumpButton("보스7(19)", () => _jumpTo(19)),
+                                _buildJumpButton("보스8(20)", () => _jumpTo(20)),
+                                _buildJumpButton("랭킹", () => _jumpTo(0, clear: true), color: Colors.green),
+                              ],
+                            )
+                          ]
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // 💡 깔끔하고 고급스러운 통합 랭킹 페이지
+              if (selectionState == 4 && (isGameOver || isGameClear))
+                Container(
+                  color: Colors.black.withAlpha(245),
                   width: double.infinity,
                   height: double.infinity,
                   child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text(isGameClear ? "🎉 ALL CLEAR! 🎉" : "💀 GAME OVER 💀",
-                             style: TextStyle(color: isGameClear ? Colors.greenAccent : Colors.redAccent, fontSize: 50, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 30),
-                        const Text("TOTAL SCORE", style: TextStyle(color: Colors.white70, fontSize: 20)),
-                        Text("$score", style: const TextStyle(color: Colors.white, fontSize: 80, fontWeight: ui.FontWeight.w900, letterSpacing: 5)),
-                        if (!isGameClear) Text("Reached Round: $currentRound", style: const TextStyle(color: Colors.white70, fontSize: 18)),
-                        const SizedBox(height: 60),
-                        ElevatedButton(
-                          onPressed: () => setState(() => selectionState = 0),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.orange,
-                            padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 15),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text("🏆 FINAL RANKING 🏆", style: TextStyle(color: Colors.yellowAccent, fontSize: 36, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 25),
+
+                          // 💡 내 기록 섹션 (깔끔한 박스 형태)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.08),
+                              borderRadius: BorderRadius.circular(15),
+                              border: Border.all(color: Colors.orangeAccent.withOpacity(0.5), width: 2),
+                            ),
+                            child: Column(
+                              children: [
+                                Text("$playerId 님의 기록", style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 8),
+                                Text("도달 라운드: $currentRound", style: const TextStyle(color: Colors.white70, fontSize: 16)),
+                                const SizedBox(height: 5),
+                                Text("$score 점", style: const TextStyle(color: Colors.orangeAccent, fontSize: 48, fontWeight: ui.FontWeight.w900)),
+                              ],
+                            ),
                           ),
-                          child: Text(isGameClear ? "다시하기" : "처음으로", style: const TextStyle(fontSize: 28, color: Colors.white, fontWeight: FontWeight.bold)),
-                        ),
-                      ],
+
+                          const SizedBox(height: 30),
+
+                          // 🏆 랭킹 섹션
+                          Container(
+                            width: screenSize.width * 0.85,
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.03),
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                            child: Column(
+                              children: [
+                                const Text("명예의 전당 TOP 5", style: TextStyle(color: Colors.white, fontSize: 18)),
+                                const Divider(color: Colors.white24, height: 30),
+
+                                if (isSavingScore)
+                                  const CircularProgressIndicator(color: Colors.orange)
+                                else if (topRankings.isEmpty)
+                                  const Text("데이터를 불러오는 중...", style: TextStyle(color: Colors.white54))
+                                else
+                                  ...topRankings.asMap().entries.map((entry) {
+                                    int rank = entry.key + 1;
+                                    var data = entry.value;
+                                    bool isMe = (data['playerId'] == playerId && data['score'] == score);
+
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Text("$rank위  ${data['playerId']}",
+                                              style: TextStyle(color: isMe ? Colors.orange : Colors.white70, fontSize: 16, fontWeight: isMe ? FontWeight.bold : FontWeight.normal)),
+                                          Text("${data['round']}R / ${data['score']}점",
+                                              style: TextStyle(color: isMe ? Colors.orange : Colors.white54, fontSize: 16)),
+                                        ],
+                                      ),
+                                    );
+                                  }).toList(),
+                              ],
+                            ),
+                          ),
+
+                          const SizedBox(height: 40),
+                          ElevatedButton(
+                            onPressed: () => setState(() {
+                              selectionState = 0;
+                              isUnlocked = false;
+                              _secretCodeController.clear(); // 다시 할 때 비밀코드 초기화
+                            }),
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.orange,
+                                padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 15),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))
+                            ),
+                            child: const Text("처음으로", style: TextStyle(fontSize: 22, color: Colors.white, fontWeight: FontWeight.bold)),
+                          ),
+                          const SizedBox(height: 20),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -821,13 +1051,10 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   }
 
   Widget _buildJumpButton(String label, VoidCallback onTap, {Color color = Colors.blueGrey}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: ElevatedButton(
-        onPressed: onTap,
-        style: ElevatedButton.styleFrom(backgroundColor: color, minimumSize: const Size(60, 40), padding: EdgeInsets.zero),
-        child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.white)),
-      ),
+    return ElevatedButton(
+      onPressed: onTap,
+      style: ElevatedButton.styleFrom(backgroundColor: color, minimumSize: const Size(60, 40), padding: EdgeInsets.zero),
+      child: Text(label, style: const TextStyle(fontSize: 12, color: Colors.white)),
     );
   }
 
@@ -972,13 +1199,10 @@ class GamePainter extends CustomPainter {
     }
 
     for (var m in missiles) {
-      // 1. 먼저 은은하게 빛나는 바깥쪽 후광(Glow)을 큼직하게 그립니다.
-      paint.color = Colors.red.withOpacity(0.8); // 투명도 40%
+      paint.color = Colors.red.withOpacity(0.8);
       paint.style = PaintingStyle.fill;
       canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(m.x - 6, m.y - 12, 12, 24), const Radius.circular(5)), paint);
-
-      // 2. 그 위에 선명하고 밝은 진짜 미사일 본체를 그립니다.
-      paint.color = Colors.white; // 코어는 하얗게!
+      paint.color = Colors.white;
       canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(m.x - 2, m.y - 8, 4, 16), const Radius.circular(2)), paint);
     }
 

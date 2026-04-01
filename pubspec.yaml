@@ -30,10 +30,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  audioplayers: ^5.2.1 # 이 줄을 추가하세요!
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  firebase_core: ^4.6.0
+  cloud_firestore: ^6.2.0
 
 dev_dependencies:
   flutter_launcher_icons: "^0.13.1"
@@ -72,6 +75,7 @@ flutter:
     - assets/body.png
     - assets/logo.png
     - assets/backgr/
+    - assets/audio/ # 다운받은 효과음을 넣을 폴더를 추가해 주세요!
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
