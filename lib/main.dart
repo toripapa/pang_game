@@ -291,6 +291,19 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   bool isLeftPressed = false;
   bool isRightPressed = false;
 
+  // 💡 효과음이 겹쳐도 끊기지 않게 플레이어를 5개 미리 준비합니다.
+  final List<AudioPlayer> _sfxPlayers = [];
+  int _currentPlayerIndex = 0;
+
+  // 💡 [수정] 게임 화면이 켜질 때 플레이어 5개를 세팅합니다.
+  @override
+  void initState() {
+    super.initState();
+    for (int i = 0; i < 5; i++) {
+      _sfxPlayers.add(AudioPlayer()..setReleaseMode(ReleaseMode.stop));
+    }
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -298,10 +311,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (playerX == 0) playerX = screenSize.width / 2;
   }
 
-  // 💡 사운드 재생 함수 추가
+  // 💡 [수정] 매번 새로 부르지 않고 만들어둔 플레이어를 즉시 재생합니다.
   void _playSound(String fileName) async {
     try {
-      await AudioPlayer().play(AssetSource('audio/$fileName'));
+      if (_sfxPlayers.isNotEmpty) {
+        await _sfxPlayers[_currentPlayerIndex].play(AssetSource('audio/$fileName'));
+        _currentPlayerIndex = (_currentPlayerIndex + 1) % _sfxPlayers.length;
+      }
     } catch (e) {
       debugPrint("사운드 재생 에러: $e");
     }
@@ -678,12 +694,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
   }
 
+  // 💡 [수정] 게임 종료 시 플레이어 메모리 해제 로직 추가
   @override
   void dispose() {
     gameTimer?.cancel();
     _focusNode.dispose();
     _idController.dispose();
     _secretCodeController.dispose();
+    for (var player in _sfxPlayers) {
+      player.dispose();
+    }
     super.dispose();
   }
 
@@ -877,14 +897,13 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                 Container(
                   color: Colors.black87,
                   child: Center(
-                    child: SingleChildScrollView( // 💡 내용이 길어지면 자동 스크롤 되도록 추가
+                    child: SingleChildScrollView(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           const Text("조작 방식을 선택하세요", style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 50),
 
-                          // 💡 조작 방식이 화면을 넘치지 않게 Wrap 적용
                           Wrap(
                             alignment: WrapAlignment.center,
                             spacing: 15,
@@ -898,12 +917,11 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
                           const SizedBox(height: 60),
 
-                          // 💡 진짜 비밀번호처럼 가려지는 입력창 (131012 입력시에만 활성화)
                           SizedBox(
                             width: 150,
                             child: TextField(
                               controller: _secretCodeController,
-                              obscureText: true, // 입력한 글자를 가림
+                              obscureText: true,
                               textAlign: TextAlign.center,
                               style: const TextStyle(color: Colors.white54, fontSize: 16),
                               decoration: const InputDecoration(
@@ -913,7 +931,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                                 focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white54)),
                               ),
                               onChanged: (value) {
-                                // 테스트 모드가 켜져 있을 때만 비밀번호 검사 작동
                                 if (isTestMode) {
                                   setState(() { isUnlocked = (value == "131012"); });
                                 }
@@ -921,10 +938,8 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                             ),
                           ),
 
-                          // 💡 코드가 맞아야만 아래 버튼 그룹이 나타남
                           if (isTestMode && isUnlocked ) ...[
                             const SizedBox(height: 15),
-                            // 💡 점프 버튼들도 화면을 넘치지 않게 Wrap 적용
                             Wrap(
                               alignment: WrapAlignment.center,
                               spacing: 8,
@@ -948,7 +963,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                   ),
                 ),
 
-              // 💡 깔끔하고 고급스러운 통합 랭킹 페이지
               if (selectionState == 4 && (isGameOver || isGameClear))
                 Container(
                   color: Colors.black.withAlpha(245),
@@ -962,7 +976,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                           const Text("🏆 FINAL RANKING 🏆", style: TextStyle(color: Colors.yellowAccent, fontSize: 36, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 25),
 
-                          // 💡 내 기록 섹션 (깔끔한 박스 형태)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
                             decoration: BoxDecoration(
@@ -983,7 +996,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
 
                           const SizedBox(height: 30),
 
-                          // 🏆 랭킹 섹션
                           Container(
                             width: screenSize.width * 0.85,
                             padding: const EdgeInsets.all(20),
@@ -1028,7 +1040,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
                             onPressed: () => setState(() {
                               selectionState = 0;
                               isUnlocked = false;
-                              _secretCodeController.clear(); // 다시 할 때 비밀코드 초기화
+                              _secretCodeController.clear();
                             }),
                             style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.orange,
