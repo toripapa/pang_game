@@ -5,7 +5,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:audioplayers/audioplayers.dart'; // 💡 사운드 패키지 추가
+import 'package:audioplayers/audioplayers.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -291,16 +291,20 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   bool isLeftPressed = false;
   bool isRightPressed = false;
 
-  // 💡 효과음이 겹쳐도 끊기지 않게 플레이어를 5개 미리 준비합니다.
   final List<AudioPlayer> _sfxPlayers = [];
   int _currentPlayerIndex = 0;
 
-  // 💡 [수정] 게임 화면이 켜질 때 플레이어 5개를 세팅합니다.
   @override
   void initState() {
     super.initState();
+
+    // 💡 [핵심 최적화 1] 앱이 켜질 때 '오디오 파일 자체'를 메모리에 미리 장전합니다.
     for (int i = 0; i < 5; i++) {
-      _sfxPlayers.add(AudioPlayer()..setReleaseMode(ReleaseMode.stop));
+      final player = AudioPlayer();
+      player.setReleaseMode(ReleaseMode.stop);
+      // 파일을 매번 찾지 않도록 소스(파일경로)를 미리 고정시켜 둡니다.
+      player.setSource(AssetSource('audio/pang_hit.wav'));
+      _sfxPlayers.add(player);
     }
   }
 
@@ -311,11 +315,15 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (playerX == 0) playerX = screenSize.width / 2;
   }
 
-  // 💡 [수정] 매번 새로 부르지 않고 만들어둔 플레이어를 즉시 재생합니다.
-  void _playSound(String fileName) async {
+  // 💡 [핵심 최적화 2] 파일을 로드(play)하는 대신, 미리 준비된 소리를 재생(resume)만 합니다.
+  void _playHitSound() async {
     try {
       if (_sfxPlayers.isNotEmpty) {
-        await _sfxPlayers[_currentPlayerIndex].play(AssetSource('audio/$fileName'));
+        // 이미 진행 중인 소리가 있다면 초기화 시키고
+        await _sfxPlayers[_currentPlayerIndex].stop();
+        // 0.001초만에 즉시 격발!
+        await _sfxPlayers[_currentPlayerIndex].resume();
+
         _currentPlayerIndex = (_currentPlayerIndex + 1) % _sfxPlayers.length;
       }
     } catch (e) {
@@ -350,7 +358,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         score = 0;
         currentRound = round;
 
-        // 보스 카운트 맵핑 (20라운드 구조 반영)
         if (round <= 3) bossDefeatCount = 0;
         else if (round <= 6) bossDefeatCount = 1;
         else if (round <= 9) bossDefeatCount = 2;
@@ -399,20 +406,16 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     isRightPressed = false;
     _focusNode.requestFocus();
 
-    // 11~20라운드가 1~10라운드의 패턴을 따르도록 매핑
     int mappedRound = ((currentRound - 1) % 10) + 1;
     bool isBossRound = (mappedRound == 3 || mappedRound == 6 || mappedRound == 9 || mappedRound == 10);
 
-    // 라운드 구간별 스피드 배율 적용
     double roundSpeedMult = 1.0;
     if (currentRound >= 17) roundSpeedMult = 1.3;
     else if (currentRound >= 14) roundSpeedMult = 1.2;
     else if (currentRound >= 11) roundSpeedMult = 1.1;
 
-    // 최종 바운스/속도 멀티플라이어 (보스처치 증가율 + 라운드 증가율 모두 반영)
     double bounceMult = (1.0 + (bossDefeatCount * 0.05)) * roundSpeedMult;
 
-    // 11~20 라운드는 기본 공 2개 추가
     int baseBallCount = 1 + bossDefeatCount;
     int ballCount = baseBallCount + (currentRound >= 11 ? 2 : 0);
 
@@ -561,8 +564,9 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
           Offset ballCenter = Offset(ball.x, ball.y);
           for (int p = 0; p < points.length - 1; p++) {
             if (_lineCircleIntersect(points[p], points[p+1], ballCenter, ball.radius)) {
-              // 💡 화살이 공을 명중했을 때 사운드 재생!
-              _playSound('pang_hit.wav');
+
+              // 💡 이제 즉각적으로 장전된 소리를 발사합니다!
+              _playHitSound();
 
               ball.hp--;
               ball.hitTimer = 5;
@@ -608,7 +612,7 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
         }
         Future.delayed(const Duration(seconds: 2), () {
           if (!isGameOver && mounted) {
-            if (currentRound >= 20) { // 총 20라운드 달성 시 게임 클리어
+            if (currentRound >= 20) {
               setState(() { isGameClear = true; });
               _saveScoreAndFetchRanking();
             } else {
@@ -652,7 +656,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     if (hitBall.sizeLevel > 1) {
       int nextLevel = hitBall.sizeLevel - 1;
 
-      // bounceSpeedMult에 라운드 증가 속도 배수가 포함되어 있어 분열 공도 속도 증가가 동일하게 적용됨
       double splitVy = (-5.0 - (hitBall.sizeLevel * 0.4)) * hitBall.bounceSpeedMult;
       double baseSplitVx = 1.0 + (5 - hitBall.sizeLevel) * 0.2;
       double splitVx = (baseSplitVx * max(1.0, globalBallSpeed * 1.5)) * hitBall.bounceSpeedMult;
@@ -694,7 +697,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
     }
   }
 
-  // 💡 [수정] 게임 종료 시 플레이어 메모리 해제 로직 추가
   @override
   void dispose() {
     gameTimer?.cancel();
@@ -711,7 +713,6 @@ class _GameScreenState extends State<GameScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     screenSize = MediaQuery.of(context).size;
 
-    // 배경은 1~10 이미지 재활용
     int mappedRound = ((currentRound - 1) % 10) + 1;
     bool isBossRound = (mappedRound == 3 || mappedRound == 6 || mappedRound == 9 || mappedRound == 10);
     int bgRoundIndex = mappedRound;
